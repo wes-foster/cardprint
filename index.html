@@ -73,6 +73,8 @@
     <label>Darkness <select id="dark"><option value="0">Light</option><option value="1" selected>Normal</option><option value="2">Dark</option></select></label>
     <label>Sending method
       <select id="method"><option value="raw">Standard (try first)</option><option value="zip">Compressed (if Standard prints junk)</option></select></label>
+    <label>Sending speed
+      <select id="speed"><option value="careful">Careful</option><option value="fast">Faster (go back if prints break)</option></select></label>
     <div class="row"><button id="test">Print test ruler</button></div>
     <p class="note">The widths are starting estimates. Print the ruler and adjust until both edge bars show.</p>
   </details>
@@ -104,6 +106,7 @@ const items = [];
 let current = -1, busy = false, stopRequested = false;
 let device = null, writeChar = null;
 let credits = 0, packet = 20, wake = null, done = null;
+let granted = false, boosted = false;     // did the printer announce its allowance; have we raised it
 
 /* ---------- log and status ---------- */
 function log(msg){ $('log').textContent += new Date().toISOString().slice(11,23) + ' ' + msg + '\n'; }
@@ -112,7 +115,7 @@ const hex = b => Array.from(b, x => x.toString(16).padStart(2,'0')).join(' ');
 const bytesOf = v => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
 
 /* ---------- settings (remembered on this phone) ---------- */
-const SAVED = ['paper','width','shift','dark','method','caption','brightness','contrast','dither','crop'];
+const SAVED = ['speed','paper','width','shift','dark','method','caption','brightness','contrast','dither','crop'];
 function save(){ try{ localStorage.setItem('cardprint', JSON.stringify(Object.fromEntries(SAVED.map(k => [k, $(k).value])))); }catch(e){} }
 function fillWidths(){
   const max = +$('paper').value;
@@ -145,12 +148,14 @@ function jpegArea(b, at){
 
 /* RAW files usually hold a ready-made JPEG preview. Return the largest one. */
 async function rawPreview(file){
-  const buf = await file.arrayBuffer(), b = new Uint8Array(buf);
-  // Fuji RAF states where its JPEG is: offset at byte 84, length at byte 88.
-  if(new TextDecoder().decode(b.subarray(0,15)) === 'FUJIFILMCCD-RAW'){
-    const v = new DataView(buf), at = v.getUint32(84), len = v.getUint32(88);
-    return new Blob([b.subarray(at, at + len)], {type:'image/jpeg'});
+  // Fuji RAF states where its JPEG is (offset at byte 84, length at byte 88),
+  // so only that part needs to be read from the card.
+  const head = await file.slice(0, 92).arrayBuffer();
+  if(new TextDecoder().decode(head.slice(0,15)) === 'FUJIFILMCCD-RAW'){
+    const v = new DataView(head), at = v.getUint32(84), len = v.getUint32(88);
+    return new Blob([await file.slice(at, at + len).arrayBuffer()], {type:'image/jpeg'});
   }
+  const b = new Uint8Array(await file.arrayBuffer());
   let best = -1, area = 0;
   for(let i = b.indexOf(0xff); i >= 0; i = b.indexOf(0xff, i+1)){
     if(b[i-1] !== 0xd8 || b[i-2] !== 0xff) continue;       // JPEG starts ff d8 ff
@@ -316,9 +321,11 @@ async function connect(){
     const notify = await service.getCharacteristic(NOTIFY);
     const write = await service.getCharacteristic(WRITE);
     const credit = await service.getCharacteristic(CREDIT);
-    credits = 0; packet = 20;
+    credits = 0; packet = 20; granted = false; boosted = false;
+    let seen = 0;
     credit.addEventListener('characteristicvaluechanged', e => {
       const b = bytesOf(e.target.value);
+      if(seen++ < 6) log('ff03 got ' + hex(b));
       if(b[0] === 1 && b.length === 2) credits += b[1];
       else if(b[0] === 2 && b.length === 3){ packet = Math.max(20, Math.min(100, b[1] | b[2] << 8)); log('packet size ' + packet); }
       else log('ff03 ' + hex(b));
@@ -329,12 +336,13 @@ async function connect(){
       log('ff01 ' + hex(b) + '  ' + new TextDecoder().decode(b).replace(/[^ -~]/g,''));
       if(b.includes(0xaa) && done) done();
     });
-    await notify.startNotifications();
     await credit.startNotifications();
+    await notify.startNotifications();
     writeChar = write;
     await sleep(300);
     // Some browsers miss the first permission to send. One short wake command prompts another.
-    if(credits === 0){ log('no initial credit; sending wake'); credits = 1; }
+    granted = credits > 0;
+    if(!granted){ log('no initial credit; sending wake'); credits = 1; }
     await send(Uint8Array.of(0x10,0xff,0xfe,0x01, 0,0,0,0,0,0,0,0,0,0,0,0));
     await sleep(300);
     for(const [name, cmd] of [['model',[0x10,0xff,0x20,0xf0]], ['firmware',[0x10,0xff,0x20,0xf1]], ['battery',[0x10,0xff,0x50,0xf1]]]){
@@ -361,20 +369,28 @@ function onLost(){
 
 /* Send bytes, spending one printer credit per packet. */
 async function send(bytes, progress){
+  let tenth = 0;
   for(let at = 0; at < bytes.length;){
     const began = Date.now();
     while(credits <= 0){
       if(!connected()) throw new Error('Printer disconnected.');
-      if(Date.now() - began > 15000) throw new Error('The printer stopped accepting data. Switch it off and on, then reconnect.');
+      if(Date.now() - began > 15000){
+        log(`stalled at byte ${at} of ${bytes.length}`);
+        throw new Error('The printer stopped accepting data. Switch it off and on, then reconnect.');
+      }
       await new Promise(r => { wake = r; setTimeout(r, 250); });
     }
     if(stopRequested) throw new Error('Stopped. Switch the printer off and on before the next print.');
-    const chunk = bytes.slice(at, at + packet);
+    const chunk = bytes.slice(at, at + ($('speed').value === 'fast' ? 100 : packet));
     credits--;
     if(writeChar.writeValueWithoutResponse) await writeChar.writeValueWithoutResponse(chunk);
     else await writeChar.writeValue(chunk);
     at += chunk.length;
-    if(progress) progress(at / bytes.length);
+    if(progress){
+      progress(at / bytes.length);
+      const t = Math.floor(at / bytes.length * 10);
+      if(t > tenth){ tenth = t; log(`${t * 10}% sent (${at} bytes)`); }
+    }
   }
 }
 
@@ -393,13 +409,19 @@ async function printCanvas(canvas){
   }else{
     job = [Uint8Array.of(0x1d,0x76,0x30,0, stride&255, stride>>8, height&255, height>>8), data];
   }
-  log(`printing ${stride*8} x ${height}, ${job[1].length} bytes, ${$('method').value}`);
+  // If the printer's opening allowance never arrived we are sending one packet at a time.
+  // Faster mode assumes the usual allowance of four.
+  if($('speed').value === 'fast' && !granted && !boosted){ credits += 3; boosted = true; }
+  const began = Date.now();
+  log(`printing ${stride*8} x ${height}, ${job[1].length} bytes, ${$('method').value}, ${$('speed').value}, announced packet ${packet}, opening allowance ${granted ? 'received' : 'missed'}`);
   await send(Uint8Array.of(0x10,0xff,0x10,0x00, +$('dark').value));
   await send(Uint8Array.of(0x10,0xff,0xfe,0x01));
   await send(new Uint8Array(12));
   await send(job[0]);
   $('progress').hidden = false;
   await send(job[1], p => $('progress').value = p);
+  const secs = (Date.now() - began) / 1000;
+  log(`sent in ${secs.toFixed(1)} s (${(job[1].length / 1024 / Math.max(secs, .1)).toFixed(1)} KB/s)`);
   await send(Uint8Array.of(0x1b,0x4a,96));                       // feed paper
   await sleep(50);
   const finished = new Promise(r => {
