@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Card Print</title>
+<style>
+  :root{color-scheme:light dark;--bg:#f4f2ee;--card:#fff;--ink:#191919;--mute:#666;--line:#d8d4cc}
+  @media(prefers-color-scheme:dark){:root{--bg:#141414;--card:#1f1f1f;--ink:#f2f2f2;--mute:#aaa;--line:#383838}}
+  *{box-sizing:border-box}
+  body{margin:0;font:17px/1.4 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--ink);
+       padding:12px 12px calc(110px + env(safe-area-inset-bottom))}
+  main{max-width:520px;margin:auto}
+  header{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  h1{font-size:22px;margin:4px 0}
+  section,details{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:12px}
+  button,.pick,select,input[type=text]{font:inherit;min-height:48px;border-radius:12px;border:1px solid var(--line);
+       background:var(--card);color:var(--ink);padding:8px 14px}
+  button:disabled{opacity:.4}
+  .primary{background:var(--ink);color:var(--bg);border-color:var(--ink);font-weight:600}
+  .pick{display:flex;align-items:center;justify-content:center;font-weight:600;border:2px dashed var(--mute)}
+  .row{display:flex;gap:8px;margin-top:8px}.row>*{flex:1;min-width:0}
+  label{display:block;margin-top:10px;font-size:15px;color:var(--mute)}
+  label select,label input[type=text],label input[type=range]{display:block;width:100%;margin-top:4px}
+  #queue{display:flex;gap:8px;overflow-x:auto;margin-top:8px}
+  #queue button{padding:0;flex:0 0 72px;height:72px;overflow:hidden;border-width:3px}
+  #queue button.on{border-color:var(--ink)}
+  #queue img{width:100%;height:100%;object-fit:cover}
+  #preview{display:block;max-width:100%;max-height:55vh;margin:auto;background:#fff;border:1px solid var(--line)}
+  .note{font-size:14px;color:var(--mute);margin:8px 0 0}
+  summary{font-weight:600;min-height:32px}
+  #bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);
+       padding:10px 12px calc(10px + env(safe-area-inset-bottom))}
+  #bar>div{max-width:520px;margin:auto}
+  progress{width:100%;height:8px}
+  pre{font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Card Print</h1><button id="connect">Connect printer</button></header>
+  <div id="status" class="note" role="status">Not connected.</div>
+
+  <section>
+    <label class="pick" style="color:var(--ink);margin:0">Choose images from card
+      <input id="files" type="file" multiple hidden></label>
+    <p class="note">On iPhone, tap <b>Choose File</b>, then your SD card under Locations. Images stay on your SD card and are not added to Photos. JPEG or RAW.</p>
+    <div id="queue"></div>
+  </section>
+
+  <section id="editor" hidden>
+    <canvas id="preview"></canvas>
+    <p id="size" class="note"></p>
+    <div class="row"><button id="rotate">Rotate</button><button id="remove">Remove</button></div>
+    <label>Crop
+      <select id="crop"><option value="0">Whole image</option><option value="1">Square</option><option value="1.3333">4:3</option><option value="1.5">3:2</option></select></label>
+    <label>Brightness <input id="brightness" type="range" min="-80" max="80" value="15"></label>
+    <label>Contrast <input id="contrast" type="range" min="-60" max="80" value="10"></label>
+    <label>Style
+      <select id="dither"><option value="floyd">Smooth dots (photos)</option><option value="atkinson">Punchy dots</option><option value="threshold">Pure black and white (text, line art)</option></select></label>
+    <label>Text under each print
+      <input id="caption" type="text" maxlength="80" placeholder="Workshop name, date"></label>
+    <label>Copies <select id="copies"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+  </section>
+
+  <details>
+    <summary>Paper and printer setup</summary>
+    <label>Paper in the printer
+      <select id="paper"><option value="576">57 mm</option><option value="864">77 mm</option><option value="1232">107 mm</option></select></label>
+    <label>Print width in dots <select id="width"></select></label>
+    <label>Shift right in dots <select id="shift"></select></label>
+    <label>Darkness <select id="dark"><option value="0">Light</option><option value="1" selected>Normal</option><option value="2">Dark</option></select></label>
+    <label>Sending method
+      <select id="method"><option value="raw">Standard (try first)</option><option value="zip">Compressed (if Standard prints junk)</option></select></label>
+    <div class="row"><button id="test">Print test ruler</button></div>
+    <p class="note">The widths are starting estimates. Print the ruler and adjust until both edge bars show.</p>
+  </details>
+
+  <details>
+    <summary>Diagnostics</summary>
+    <div class="row"><button id="copylog">Copy log</button></div>
+    <pre id="log"></pre>
+  </details>
+</main>
+
+<div id="bar"><div>
+  <progress id="progress" value="0" max="1" hidden></progress>
+  <div class="row" style="margin:0">
+    <button id="printOne" class="primary" disabled>Print this</button>
+    <button id="printAll" disabled>Print all</button>
+    <button id="stop" hidden>Stop</button>
+  </div>
+</div></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const uuid = h => `0000${h}-0000-1000-8000-00805f9b34fb`;
+const SERVICE = uuid('ff00'), NOTIFY = uuid('ff01'), WRITE = uuid('ff02'), CREDIT = uuid('ff03');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const items = [];
+let current = -1, busy = false, stopRequested = false;
+let device = null, writeChar = null;
+let credits = 0, packet = 20, wake = null, done = null;
+
+/* ---------- log and status ---------- */
+function log(msg){ $('log').textContent += new Date().toISOString().slice(11,23) + ' ' + msg + '\n'; }
+function status(msg){ $('status').textContent = msg; log(msg); }
+const hex = b => Array.from(b, x => x.toString(16).padStart(2,'0')).join(' ');
+const bytesOf = v => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+
+/* ---------- settings (remembered on this phone) ---------- */
+const SAVED = ['paper','width','shift','dark','method','caption','brightness','contrast','dither','crop'];
+function save(){ try{ localStorage.setItem('cardprint', JSON.stringify(Object.fromEntries(SAVED.map(k => [k, $(k).value])))); }catch(e){} }
+function fillWidths(){
+  const max = +$('paper').value;
+  $('width').innerHTML = '';
+  for(let w = max + 64; w >= max - 192; w -= 8) if(w <= 1280) $('width').add(new Option(w, w));
+  $('width').value = max;
+}
+for(let s = 0; s <= 640; s += 8) $('shift').add(new Option(s, s));
+fillWidths();
+try{
+  const s = JSON.parse(localStorage.getItem('cardprint') || '{}');
+  if(s.paper){ $('paper').value = s.paper; fillWidths(); }
+  for(const k of SAVED) if(s[k] !== undefined) $(k).value = s[k];
+}catch(e){}
+
+/* ---------- images ---------- */
+const RAW = /\.(raf|dng|cr2|nef|arw|orf|rw2)$/i;
+
+/* Width x height of a viewable JPEG starting at `at`, or 0. Lossless JPEG (raw sensor data) is skipped. */
+function jpegArea(b, at){
+  let p = at + 2;
+  while(p + 9 < b.length && b[p] === 0xff){
+    const m = b[p+1];
+    if(m >= 0xc0 && m <= 0xc2) return (b[p+5] << 8 | b[p+6]) * (b[p+7] << 8 | b[p+8]);
+    if(m === 0xda || m === 0xc3) return 0;
+    p += 2 + (b[p+2] << 8 | b[p+3]);
+  }
+  return 0;
+}
+
+/* RAW files usually hold a ready-made JPEG preview. Return the largest one. */
+async function rawPreview(file){
+  const buf = await file.arrayBuffer(), b = new Uint8Array(buf);
+  // Fuji RAF states where its JPEG is: offset at byte 84, length at byte 88.
+  if(new TextDecoder().decode(b.subarray(0,15)) === 'FUJIFILMCCD-RAW'){
+    const v = new DataView(buf), at = v.getUint32(84), len = v.getUint32(88);
+    return new Blob([b.subarray(at, at + len)], {type:'image/jpeg'});
+  }
+  let best = -1, area = 0;
+  for(let i = b.indexOf(0xff); i >= 0; i = b.indexOf(0xff, i+1)){
+    if(b[i-1] !== 0xd8 || b[i-2] !== 0xff) continue;       // JPEG starts ff d8 ff
+    const a = jpegArea(b, i-2);
+    if(a > area){ area = a; best = i-2; }
+  }
+  if(best < 0) throw new Error('no preview inside');
+  return new Blob([b.subarray(best)], {type:'image/jpeg'});
+}
+
+$('files').onchange = async e => {
+  for(const file of e.target.files){
+    status(`Opening ${file.name}…`);
+    let url, img;
+    try{
+      url = URL.createObjectURL(RAW.test(file.name) ? await rawPreview(file) : file);
+      img = new Image();
+      img.src = url;
+      await img.decode();
+    }catch(err){ status(`Could not open ${file.name}. Try the JPEG version.`); URL.revokeObjectURL(url); continue; }
+    status(`Added ${file.name} (${img.naturalWidth} × ${img.naturalHeight}).`);
+    // Keep a reduced copy so a queue of camera files does not exhaust memory.
+    const scale = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+    const src = document.createElement('canvas');
+    src.width = Math.round(img.naturalWidth * scale);
+    src.height = Math.round(img.naturalHeight * scale);
+    src.getContext('2d').drawImage(img, 0, 0, src.width, src.height);
+    URL.revokeObjectURL(url);
+    // Landscape pictures start rotated so they use the full paper width.
+    items.push({name:file.name, src, thumb:src.toDataURL('image/jpeg', .5), turns: src.width > src.height ? 1 : 0});
+    if(current < 0) current = 0;
+    refresh();
+  }
+  e.target.value = '';
+};
+
+function refresh(){
+  $('queue').innerHTML = '';
+  items.forEach((it, i) => {
+    const b = document.createElement('button');
+    b.className = i === current ? 'on' : '';
+    b.setAttribute('aria-label', it.name);
+    const im = new Image(); im.src = it.thumb; im.alt = '';
+    b.append(im);
+    b.onclick = () => { current = i; refresh(); };
+    $('queue').append(b);
+  });
+  $('editor').hidden = current < 0;
+  $('printOne').disabled = busy || current < 0;
+  $('printAll').disabled = busy || !items.length;
+  $('printAll').textContent = items.length > 1 ? `Print all (${items.length})` : 'Print all';
+  $('test').disabled = busy;
+  if(current >= 0){
+    const c = render(items[current]);
+    $('preview').width = c.width; $('preview').height = c.height;
+    $('preview').getContext('2d').drawImage(c, 0, 0);
+    $('size').textContent = `${items[current].name}: about ${Math.round(c.height * 25.4 / 304)} mm of paper`;
+  }
+}
+
+/* Draw one image at print width and reduce it to pure black and white. */
+function render(item){
+  const width = +$('width').value;
+  const turns = item.turns % 4, src = item.src;
+  const rw = turns % 2 ? src.height : src.width, rh = turns % 2 ? src.width : src.height;
+  const rot = document.createElement('canvas'); rot.width = rw; rot.height = rh;
+  const r = rot.getContext('2d');
+  r.translate(rw/2, rh/2); r.rotate(turns * Math.PI/2); r.drawImage(src, -src.width/2, -src.height/2);
+
+  let sx = 0, sy = 0, sw = rw, sh = rh;
+  let ratio = +$('crop').value;
+  if(ratio){
+    if(rh > rw) ratio = 1/ratio;
+    if(sw/sh > ratio){ sw = sh*ratio; sx = (rw-sw)/2; } else { sh = sw/ratio; sy = (rh-sh)/2; }
+  }
+  const h = Math.max(1, Math.min(4000, Math.round(width * sh / sw)));
+  const caption = $('caption').value.trim();
+  const capH = caption ? 64 : 0;
+
+  const c = document.createElement('canvas'); c.width = width; c.height = h + capH;
+  const g = c.getContext('2d', {willReadFrequently:true});
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(rot, sx, sy, sw, sh, 0, 0, width, h);
+  dither(g, width, h, $('dither').value, +$('brightness').value, +$('contrast').value);
+  if(capH){
+    g.fillStyle = '#000'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = '600 34px -apple-system, system-ui, sans-serif';
+    g.fillText(caption, width/2, h + capH/2, width - 16);
+    dither(g, width, capH, 'threshold', 0, 0, h);
+  }
+  return c;
+}
+
+function dither(g, w, h, mode, brightness, contrast, top = 0){
+  const img = g.getImageData(0, top, w, h), d = img.data;
+  const grey = new Float32Array(w*h);
+  const k = (100 + contrast) / 100;
+  for(let i = 0; i < grey.length; i++){
+    const v = .299*d[i*4] + .587*d[i*4+1] + .114*d[i*4+2];
+    grey[i] = Math.max(0, Math.min(255, (v - 128)*k*k + 128 + brightness));
+  }
+  const spread = mode === 'floyd'
+    ? [[1,0,7/16],[-1,1,3/16],[0,1,5/16],[1,1,1/16]]
+    : mode === 'atkinson'
+    ? [[1,0,1/8],[2,0,1/8],[-1,1,1/8],[0,1,1/8],[1,1,1/8],[0,2,1/8]]
+    : [];
+  for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
+    const i = y*w + x, out = grey[i] < 128 ? 0 : 255, err = grey[i] - out;
+    for(const [dx,dy,f] of spread){
+      const nx = x+dx, ny = y+dy;
+      if(nx >= 0 && nx < w && ny < h) grey[ny*w+nx] += err*f;
+    }
+    d[i*4] = d[i*4+1] = d[i*4+2] = out; d[i*4+3] = 255;
+  }
+  g.putImageData(img, 0, top);
+}
+
+/* Pack a canvas into 1 bit per dot, leftmost dot in the top bit, 1 = black. */
+function toRaster(canvas, shift){
+  const w = canvas.width, h = canvas.height;
+  const stride = Math.ceil((w + shift) / 8);
+  const d = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const data = new Uint8Array(stride*h);
+  for(let y = 0; y < h; y++) for(let x = 0; x < w; x++)
+    if(d[(y*w+x)*4] < 128){ const p = x + shift; data[y*stride + (p>>3)] |= 0x80 >> (p&7); }
+  return {data, stride, height:h};
+}
+
+function testRuler(){
+  const width = +$('width').value;
+  const c = document.createElement('canvas'); c.width = width; c.height = 240;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0,0,width,240);
+  g.fillStyle = '#000';
+  g.fillRect(0,0,12,240); g.fillRect(width-12,0,12,240);       // edge bars
+  g.fillRect(0,0,width,4);
+  g.font = '24px sans-serif'; g.textAlign = 'center';
+  for(let x = 96; x < width - 40; x += 96){ g.fillRect(x, 0, 3, 50); g.fillText(x, x, 80); }
+  g.font = '600 32px sans-serif';
+  g.fillText(`width ${width}  shift ${$('shift').value}`, width/2, 150);
+  g.fillRect(24, 190, 288, 16);                                 // 288 dots = 24 mm at 304 dpi
+  g.font = '22px sans-serif'; g.textAlign = 'left'; g.fillText('bar should be 24 mm', 24, 232);
+  return c;
+}
+
+/* ---------- Bluetooth ---------- */
+const connected = () => !!(device && device.gatt.connected && writeChar);
+
+async function connect(){
+  if(!navigator.bluetooth) throw new Error('This browser has no Bluetooth. On iPhone, open this page in Bluefy.');
+  status('Looking for printers…');
+  device = await navigator.bluetooth.requestDevice({
+    filters:[{namePrefix:'PeriPage'}],
+    optionalServices:[SERVICE, uuid('180a')]
+  });
+  device.addEventListener('gattserverdisconnected', onLost);
+  status(`Connecting to ${device.name}…`);
+  try{
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    try{ for(const c of await service.getCharacteristics()) log(`characteristic ${c.uuid} ${Object.keys({read:1,write:1,writeWithoutResponse:1,notify:1}).filter(p => c.properties && c.properties[p])}`); }catch(e){}
+    const notify = await service.getCharacteristic(NOTIFY);
+    const write = await service.getCharacteristic(WRITE);
+    const credit = await service.getCharacteristic(CREDIT);
+    credits = 0; packet = 20;
+    credit.addEventListener('characteristicvaluechanged', e => {
+      const b = bytesOf(e.target.value);
+      if(b[0] === 1 && b.length === 2) credits += b[1];
+      else if(b[0] === 2 && b.length === 3){ packet = Math.max(20, Math.min(100, b[1] | b[2] << 8)); log('packet size ' + packet); }
+      else log('ff03 ' + hex(b));
+      if(wake) wake();
+    });
+    notify.addEventListener('characteristicvaluechanged', e => {
+      const b = bytesOf(e.target.value);
+      log('ff01 ' + hex(b) + '  ' + new TextDecoder().decode(b).replace(/[^ -~]/g,''));
+      if(b.includes(0xaa) && done) done();
+    });
+    await notify.startNotifications();
+    await credit.startNotifications();
+    writeChar = write;
+    await sleep(300);
+    // Some browsers miss the first permission to send. One short wake command prompts another.
+    if(credits === 0){ log('no initial credit; sending wake'); credits = 1; }
+    await send(Uint8Array.of(0x10,0xff,0xfe,0x01, 0,0,0,0,0,0,0,0,0,0,0,0));
+    await sleep(300);
+    for(const [name, cmd] of [['model',[0x10,0xff,0x20,0xf0]], ['firmware',[0x10,0xff,0x20,0xf1]], ['battery',[0x10,0xff,0x50,0xf1]]]){
+      log('asking ' + name);
+      await send(Uint8Array.from(cmd));
+      await sleep(300);
+    }
+  }catch(e){
+    writeChar = null;
+    device.gatt.disconnect();
+    throw e;
+  }
+  $('connect').textContent = 'Disconnect';
+  status(`Connected to ${device.name}.`);
+}
+
+function onLost(){
+  writeChar = null;
+  $('connect').textContent = 'Connect printer';
+  status('Printer disconnected.');
+  if(wake) wake();
+  if(done) done(false);
+}
+
+/* Send bytes, spending one printer credit per packet. */
+async function send(bytes, progress){
+  for(let at = 0; at < bytes.length;){
+    const began = Date.now();
+    while(credits <= 0){
+      if(!connected()) throw new Error('Printer disconnected.');
+      if(Date.now() - began > 15000) throw new Error('The printer stopped accepting data. Switch it off and on, then reconnect.');
+      await new Promise(r => { wake = r; setTimeout(r, 250); });
+    }
+    if(stopRequested) throw new Error('Stopped. Switch the printer off and on before the next print.');
+    const chunk = bytes.slice(at, at + packet);
+    credits--;
+    if(writeChar.writeValueWithoutResponse) await writeChar.writeValueWithoutResponse(chunk);
+    else await writeChar.writeValue(chunk);
+    at += chunk.length;
+    if(progress) progress(at / bytes.length);
+  }
+}
+
+async function compress(data){
+  if(!window.CompressionStream) throw new Error('Compressed sending needs a newer iOS version.');
+  const stream = new Blob([data]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer()).slice(2);   // drop zlib header
+}
+
+async function printCanvas(canvas){
+  const {data, stride, height} = toRaster(canvas, +$('shift').value);
+  let job;
+  if($('method').value === 'zip'){
+    const body = await compress(data), n = body.length;
+    job = [Uint8Array.of(0x1f,0, stride>>8, stride&255, height>>8, height&255, n>>>24, n>>>16&255, n>>>8&255, n&255), body];
+  }else{
+    job = [Uint8Array.of(0x1d,0x76,0x30,0, stride&255, stride>>8, height&255, height>>8), data];
+  }
+  log(`printing ${stride*8} x ${height}, ${job[1].length} bytes, ${$('method').value}`);
+  await send(Uint8Array.of(0x10,0xff,0x10,0x00, +$('dark').value));
+  await send(Uint8Array.of(0x10,0xff,0xfe,0x01));
+  await send(new Uint8Array(12));
+  await send(job[0]);
+  $('progress').hidden = false;
+  await send(job[1], p => $('progress').value = p);
+  await send(Uint8Array.of(0x1b,0x4a,96));                       // feed paper
+  await sleep(50);
+  const finished = new Promise(r => {
+    const t = setTimeout(() => r(false), 45000);
+    done = (ok = true) => { clearTimeout(t); r(ok); };
+  });
+  await send(Uint8Array.of(0x10,0xff,0xfe,0x45));
+  const ok = await finished;
+  done = null;
+  if(!ok) log('no completion reply from printer');
+}
+
+/* One job at a time: connect if needed, then print each canvas. */
+async function run(makers){
+  if(busy) return;
+  busy = true; stopRequested = false; refresh(); $('stop').hidden = false;
+  try{
+    if(!connected()) await connect();
+    for(let i = 0; i < makers.length; i++){
+      if(stopRequested) break;
+      status(`Printing ${i+1} of ${makers.length}…`);
+      await printCanvas(makers[i]());
+      await sleep(800);
+    }
+    status(stopRequested ? 'Stopped.' : 'Sent. Check the paper.');
+  }catch(e){
+    status(e.name === 'NotFoundError' ? 'No printer chosen, or it lacks the expected service. See Diagnostics. ' + e.message : e.message);
+    // A half-sent image leaves the printer waiting, so drop the link.
+    if(connected()) device.gatt.disconnect();
+  }
+  busy = false; $('stop').hidden = true; $('progress').hidden = true; $('progress').value = 0;
+  refresh();
+}
+
+const jobsFor = list => list.flatMap(it => Array(+$('copies').value).fill(() => render(it)));
+$('printOne').onclick = () => run(jobsFor([items[current]]));
+$('printAll').onclick = () => run(jobsFor(items));
+$('test').onclick = () => run([testRuler]);
+$('stop').onclick = () => { stopRequested = true; status('Stopping…'); };
+$('connect').onclick = async () => {
+  if(connected()){ device.gatt.disconnect(); return; }
+  if(busy) return;
+  busy = true; stopRequested = false; refresh();
+  try{ await connect(); }catch(e){ status(e.message); }
+  busy = false; refresh();
+};
+$('rotate').onclick = () => { items[current].turns++; refresh(); };
+$('remove').onclick = () => { items.splice(current,1); current = Math.min(current, items.length-1); refresh(); };
+$('paper').onchange = () => { fillWidths(); save(); refresh(); };
+for(const id of SAVED.filter(k => k !== 'paper')) $(id).addEventListener('change', () => { save(); refresh(); });
+$('copylog').onclick = async () => {
+  try{ await navigator.clipboard.writeText(`${navigator.userAgent}\n${$('log').textContent}`); status('Log copied.'); }
+  catch(e){ status('Could not copy. Select the log text by hand.'); }
+};
+log('ready; bluetooth ' + (navigator.bluetooth ? 'available' : 'not available'));
+refresh();
+</script>
+</body>
+</html>
